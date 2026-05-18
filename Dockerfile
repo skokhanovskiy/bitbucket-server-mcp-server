@@ -25,4 +25,6 @@ RUN npm ci --omit=dev
 ENV BITBUCKET_URL=https://your-bitbucket-server.com
 ENV BITBUCKET_TOKEN=your-access-token
 
-ENTRYPOINT ["node", "build/index.js"]
+EXPOSE 3000
+
+ENTRYPOINT ["node", "build/index.js", "--http"]

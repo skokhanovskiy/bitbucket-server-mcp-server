@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import express, { type Request, type Response } from 'express';
+import cors from 'cors';
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -2129,17 +2132,46 @@ export class BitbucketServer {
     };
   }
 
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    logger.info('Bitbucket MCP server running on stdio');
+  async run(mode: 'stdio' | 'http' = 'stdio') {
+    if (mode === 'http') {
+      const app = express();
+      app.use(cors());
+      app.use(express.json());
+
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      await this.server.connect(transport);
+
+      app.all('/mcp', (req: Request, res: Response) => {
+        transport.handleRequest(req, res, req.body).catch((err: unknown) => {
+          logger.error('Error in transport.handleRequest', err);
+          if (!res.headersSent) res.status(500).json({ error: 'Internal Server Error' });
+        });
+      });
+
+      app.get('/', (_req: Request, res: Response) => {
+        res.send('Bitbucket MCP Server is running');
+      });
+
+      const PORT = Number(process.env.PORT ?? 3000);
+      await new Promise<void>((resolve) => {
+        app.listen(PORT, () => {
+          logger.info(`HTTP transport listening on http://localhost:${PORT}/mcp`);
+          resolve();
+        });
+      });
+    } else {
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      logger.info('Bitbucket MCP server running on stdio');
+    }
   }
 }
 
 // Entry point — only runs when this module is executed directly, not when imported.
 if (process.argv[1] === new URL(import.meta.url).pathname) {
+  const mode = process.argv.includes('--http') ? 'http' : 'stdio';
   const server = new BitbucketServer();
-  server.run().catch((error) => {
+  server.run(mode).catch((error) => {
     logger.error('Server error', error);
     process.exit(1);
   });

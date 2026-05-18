@@ -46,6 +46,31 @@ npm install
 npm run build
 ```
 
+## Docker Deployment
+
+The server can be run as a Docker container in HTTP transport mode.
+
+### Build and Run
+
+```bash
+docker build -t bitbucket-mcp-server .
+
+# Token authentication
+docker run -d -p 3000:3000 \
+  -e BITBUCKET_URL=https://your-bitbucket-server.com \
+  -e BITBUCKET_TOKEN=your-access-token \
+  bitbucket-mcp-server
+
+# Basic authentication
+docker run -d -p 3000:3000 \
+  -e BITBUCKET_URL=https://your-bitbucket-server.com \
+  -e BITBUCKET_USERNAME=your-username \
+  -e BITBUCKET_PASSWORD=your-password \
+  bitbucket-mcp-server
+```
+
+The container exposes the MCP endpoint at `http://localhost:3000/mcp`. Port is configurable via the `PORT` environment variable.
+
 ## Features
 
 The server provides the following tools for comprehensive Bitbucket Server integration:
@@ -680,7 +705,11 @@ merge_pull_request --repository "my-repo" --prId 123 --strategy "squash"
 
 ## Configuration
 
-The server requires configuration in the VSCode MCP settings file. Here's a sample configuration:
+The server supports two transport modes: **stdio** (default) for local MCP clients, and **HTTP** for Docker or remote deployments.
+
+### Stdio Mode (Default)
+
+Used by local MCP clients (Claude Desktop, VSCode, Cursor, etc.). The client spawns the server process directly.
 
 ```json
 {
@@ -704,6 +733,26 @@ The server requires configuration in the VSCode MCP settings file. Here's a samp
 }
 ```
 
+### HTTP Mode
+
+Used for Docker deployments or remote/shared server setups. Start the server with the `--http` flag:
+
+```bash
+node build/index.js --http
+```
+
+The server listens on port 3000 by default (configurable via `PORT`) and exposes the MCP endpoint at `/mcp`. Client configuration:
+
+```json
+{
+  "mcpServers": {
+    "bitbucket": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
 ### Environment Variables
 
 - `BITBUCKET_URL` (required): Base URL of your Bitbucket Server instance
@@ -715,6 +764,7 @@ The server requires configuration in the VSCode MCP settings file. Here's a samp
 - `BITBUCKET_LOG_PATH` (optional): Custom path for the log file (default: `~/.bitbucket-server-mcp/bitbucket.log`)
 - `BITBUCKET_READ_ONLY` (optional): Set to `true` to enable read-only mode
 - `BITBUCKET_CUSTOM_HEADERS` (optional): Comma-separated list of custom HTTP headers to add to all requests (format: `Header-Name=value,Another-Header=value2`). Useful for Zero Trust tokens or proxy headers
+- `PORT` (optional): HTTP server port when running in HTTP mode (default: `3000`)
 
 **Note**: With the new optional project support, you can now:
 

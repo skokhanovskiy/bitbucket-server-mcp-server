@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { randomUUID } from 'node:crypto';
 import express, { type Request, type Response } from 'express';
 import cors from 'cors';
 import {
@@ -193,27 +194,14 @@ export class BitbucketServer {
   private readonly config: BitbucketConfig;
 
   constructor(options?: BitbucketServerOptions) {
-    this.server = new Server(
-      {
-        name: 'bitbucket-server-mcp-server',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Configuration initiale à partir des variables d'environnement
     this.config = {
       baseUrl: options?.baseUrl ?? process.env.BITBUCKET_URL ?? '',
       token: options?.token ?? process.env.BITBUCKET_TOKEN,
       username: options?.username ?? process.env.BITBUCKET_USERNAME,
       password: options?.password ?? process.env.BITBUCKET_PASSWORD,
       defaultProject: options?.defaultProject ?? process.env.BITBUCKET_DEFAULT_PROJECT,
-      maxLinesPerFile: process.env.BITBUCKET_DIFF_MAX_LINES_PER_FILE 
-        ? parseInt(process.env.BITBUCKET_DIFF_MAX_LINES_PER_FILE, 10) 
+      maxLinesPerFile: process.env.BITBUCKET_DIFF_MAX_LINES_PER_FILE
+        ? parseInt(process.env.BITBUCKET_DIFF_MAX_LINES_PER_FILE, 10)
         : undefined,
       readOnly: options?.readOnly ?? process.env.BITBUCKET_READ_ONLY === 'true',
       customHeaders: options?.customHeaders ?? parseCustomHeaders(process.env.BITBUCKET_CUSTOM_HEADERS),
@@ -227,7 +215,6 @@ export class BitbucketServer {
       throw new Error('Either BITBUCKET_TOKEN or BITBUCKET_USERNAME/PASSWORD is required');
     }
 
-    // Configuration de l'instance Axios
     this.api = axios.create({
       baseURL: `${this.config.baseUrl}/rest/api/1.0`,
       headers: {
@@ -239,9 +226,7 @@ export class BitbucketServer {
         : undefined,
     });
 
-    this.setupToolHandlers();
-    
-    this.server.onerror = (error) => logger.error('[MCP Error]', error);
+    this.server = this.createServer();
   }
 
   async connect(transport: Transport): Promise<void> {
@@ -261,10 +246,20 @@ export class BitbucketServer {
       (input.reviewers === undefined || Array.isArray(input.reviewers));
   }
 
-  private setupToolHandlers() {
+  private createServer(): Server {
+    const server = new Server(
+      { name: 'bitbucket-server-mcp-server', version: '1.0.0' },
+      { capabilities: { tools: {} } },
+    );
+    server.onerror = (error) => logger.error('[MCP Error]', error);
+    this.setupToolHandlers(server);
+    return server;
+  }
+
+  private setupToolHandlers(server: Server) {
     const readOnlyTools = ['list_projects', 'list_repositories', 'get_pull_request', 'list_pull_requests', 'get_diff', 'get_reviews', 'get_activities', 'get_comments', 'search', 'get_file_content', 'browse_repository', 'list_branches', 'list_commits', 'get_code_insights', 'get_dashboard_pull_requests'];
-    
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
           name: 'list_projects',
@@ -695,7 +690,7 @@ export class BitbucketServer {
       ].filter(tool => !this.config.readOnly || readOnlyTools.includes(tool.name))
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
         logger.info(`Called tool: ${request.params.name}`, { arguments: request.params.arguments });
         const args = request.params.arguments ?? {};
@@ -2140,14 +2135,38 @@ export class BitbucketServer {
       app.use(cors());
       app.use(express.json());
 
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await this.server.connect(transport);
+      const transports = new Map<string, StreamableHTTPServerTransport>();
 
-      app.all('/mcp', (req: Request, res: Response) => {
-        transport.handleRequest(req, res, req.body).catch((err: unknown) => {
+      app.all('/mcp', async (req: Request, res: Response) => {
+        const jsonrpcMethod = req.body?.method ?? (Array.isArray(req.body) ? 'batch' : undefined);
+        logger.info(`${req.method} /mcp`, { session: req.headers['mcp-session-id'] ?? 'none', jsonrpc: jsonrpcMethod });
+
+        try {
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+          if (sessionId && transports.has(sessionId)) {
+            await transports.get(sessionId)!.handleRequest(req, res, req.body);
+            return;
+          }
+
+          if (req.method !== 'POST') {
+            res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bad Request: No valid session' }, id: null });
+            return;
+          }
+
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
+          transport.onclose = () => {
+            const sid = transport.sessionId;
+            if (sid) transports.delete(sid);
+          };
+          const server = this.createServer();
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+          if (transport.sessionId) transports.set(transport.sessionId, transport);
+        } catch (err: unknown) {
           logger.error('Error in transport.handleRequest', err);
           if (!res.headersSent) res.status(500).json({ error: 'Internal Server Error' });
-        });
+        }
       });
 
       app.get('/', (_req: Request, res: Response) => {

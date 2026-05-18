@@ -18,22 +18,24 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
-// Resolve log file path: BITBUCKET_LOG_PATH env var > default (~/.bitbucket-server-mcp/bitbucket.log)
-const defaultLogDir = path.join(os.homedir(), '.bitbucket-server-mcp');
-const logFilePath = process.env.BITBUCKET_LOG_PATH || path.join(defaultLogDir, 'bitbucket.log');
+const isHttpMode = process.argv.includes('--http');
 
-// Ensure log directory exists
-const logDir = path.dirname(logFilePath);
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir, { recursive: true });
+function createTransports(): winston.transport[] {
+  if (isHttpMode) return [new winston.transports.Console()];
+
+  const defaultLogDir = path.join(os.homedir(), '.bitbucket-server-mcp');
+  const logFilePath = process.env.BITBUCKET_LOG_PATH || path.join(defaultLogDir, 'bitbucket.log');
+  const logDir = path.dirname(logFilePath);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+  return [new winston.transports.File({ filename: logFilePath })];
 }
 
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.json(),
-  transports: [
-    new winston.transports.File({ filename: logFilePath })
-  ]
+  transports: createTransports()
 });
 
 interface BitbucketActivity {
@@ -2153,12 +2155,19 @@ export class BitbucketServer {
       });
 
       const PORT = Number(process.env.PORT ?? 3000);
-      await new Promise<void>((resolve) => {
-        app.listen(PORT, () => {
+      const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+        const s = app.listen(PORT, () => {
           logger.info(`HTTP transport listening on http://localhost:${PORT}/mcp`);
-          resolve();
+          resolve(s);
         });
       });
+
+      const shutdown = () => {
+        logger.info('Shutting down...');
+        httpServer.close(() => process.exit(0));
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
     } else {
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
